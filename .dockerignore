@@ -1,0 +1,5 @@
+# Only the package reaches the image.
+*
+!bomb
+**/__pycache__
+**/*.pyc

@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.env
+state/
+backups/
+logs/
+build/
+dist/
+compose.override.yml
+.setup-files
+.setup-version
+data/

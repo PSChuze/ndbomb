@@ -1,0 +1,51 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tests
+        run: python -m unittest discover -s tests -t .
+      - name: Room flow self-test
+        run: python -m bomb.selftest_rooms
+      - name: Admin port self-test
+        run: python -m bomb.selftest_adminport
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: docker build -t ndbomb:ci .
+      - name: Every module imports, each service starts
+        run: |
+          set -eu
+          docker run --rm ndbomb:ci python -c "
+          import importlib, pkgutil, bomb
+          for m in pkgutil.iter_modules(bomb.__path__):
+              importlib.import_module('bomb.' + m.name)
+          print('imports OK')
+          "
+          for svc in "bomb.game --bind 127.0.0.1 --port 10020" "bomb.ticket --bind 127.0.0.1 --port 9901" \
+                     "bomb.web --bind 127.0.0.1 --port 80"; do
+            cid=$(docker run -d -e BOMB_GAME_ADDR=127.0.0.1 -e BOMB_RELAY_PORT=10081 ndbomb:ci python -u -m $svc)
+            sleep 3
+            if [ "$(docker inspect -f '{{.State.Running}}' "$cid")" != true ]; then
+              docker logs "$cid"; docker rm -f "$cid" >/dev/null; echo "FAIL: $svc exited"; exit 1
+            fi
+            docker rm -f "$cid" >/dev/null
+            echo "starts OK: $svc"
+          done
+      - name: Compose file
+        run: |
+          cp .env.example .env
+          sed -i 's/^BOMB_GAME_ADDR=$/BOMB_GAME_ADDR=192.0.2.10/; s/^BOMB_ADMIN_TOKEN=$/BOMB_ADMIN_TOKEN=ci/' .env
+          docker compose config --quiet

@@ -1,0 +1,89 @@
+# The Bomberman Online server: docker compose up -d
+#
+# Settings come from .env (copy .env.example, or run python setup.py). Sign-in needs a Feega
+# service on the `openlobby` Docker network (PSChuze/freega; setup starts one when none runs),
+# the consoles need a DNS server that sends the game's host names here, and port 80 is the
+# shared web server's (README.md).
+#
+# Host folders (BOMB_STATE, default ./state):
+#   data/   profiles.json, players.json (ids, nicknames, ranking), support.json (support mail),
+#           news.json and faq.json (BOMBERMAN WEB), board/live.json (the public snapshot)
+#   logs/   one log per service
+name: bomb
+
+x-bomb: &bomb
+  build: .
+  image: ndbomb:local
+  restart: unless-stopped
+  env_file: .env
+  volumes:
+    - ${BOMB_STATE:-./state}/data:/data
+    - ${BOMB_STATE:-./state}/logs:/logs
+  logging:
+    driver: json-file
+    options: {max-size: "10m", max-file: "3"}
+
+services:
+  # Game and lobby: login, lobby list, rooms, chat, profiles, rankings. The match relay runs in
+  # the same process, and so does the admin port for an OpenLobby panel (never published).
+  game:
+    <<: *bomb
+    command: ["python", "-u", "-m", "bomb.game", "--bind", "0.0.0.0", "--port", "10020"]
+    stop_grace_period: 10s
+    environment:
+      BOMB_GAME_PORT: "10020"
+      # The lobby entries carry a dotted IP the console connects to: this server's address as
+      # players reach it. BOMB_ADVERTISE_MAP can pick one per player network (.env.example).
+      BOMB_GAME_ADDR: ${BOMB_GAME_ADDR:?set BOMB_GAME_ADDR in .env}
+      BOMB_ADVERTISE_MAP: ${BOMB_ADVERTISE_MAP:-}
+      # Matches run console to console; with a relay port the members link to the host through
+      # the relay (no open ports on any console). 0 = direct to the host's TCP 10080 (LAN only).
+      BOMB_RELAY_PORT: ${BOMB_RELAY_PORT:-10081}   # 10081 or 0; the published port is 10081
+      BOMB_RELAY_HOST: ${BOMB_RELAY_HOST:-}
+      BOMB_ADMIN_PORT: "24090"
+      BOMB_ADMIN_BIND: 0.0.0.0
+      BOMB_ADMIN_TOKEN: ${BOMB_ADMIN_TOKEN:?set BOMB_ADMIN_TOKEN in .env}
+      BOMB_FEEGA_URL: ${BOMB_FEEGA_URL:-http://feega:24030}
+    ports:
+      - "10020:10020/tcp"
+      - "10020:10020/udp"
+      - "10081:10081/tcp"
+    networks:
+      default: {}
+      openlobby:
+        aliases: [bomb]
+    labels:
+      org.openlobby.role: game
+      org.openlobby.game.key: bomb
+      org.openlobby.game.title: Bomberman Online
+      org.openlobby.admin.url: http://bomb:24090
+
+  # Ticket check after the Feega sign-in (plain TCP, fixed-width ASCII).
+  ticket:
+    <<: *bomb
+    command: ["python", "-u", "-m", "bomb.ticket", "--bind", "0.0.0.0", "--port", "9901"]
+    ports:
+      - "9901:9901/tcp"
+
+  # HTTP: the patch check (pkg02), BOMBERMAN WEB news, FAQ and support mail (pkg01), and
+  # db_write.asp (pkg03, only with nickname registration and a TLS front whose certificate the
+  # freega CA signs, see .env.example).
+  # Port 80 on the host belongs to the web server every install shares (OpenLobby's, labelled
+  # org.openlobby.role=http); it sends the pkg01 and pkg02 host names to http://bomb-web:80.
+  web:
+    <<: *bomb
+    command: ["python", "-u", "-m", "bomb.web", "--bind", "0.0.0.0", "--port", "80"]
+    environment:
+      BOMB_FEEGA_URL: ${BOMB_FEEGA_URL:-http://feega:24030}
+      # A chat bot's support API (off without BOMB_SUPPORT_API_TOKEN): its own port, reachable
+      # on the openlobby network at http://bomb-web:24081 and never published or sent through
+      # the shared web server, which only forwards to port 80.
+      BOMB_SUPPORT_API_PORT: "24081"
+    networks:
+      default: {}
+      openlobby:
+        aliases: [bomb-web]
+
+networks:
+  openlobby:
+    external: true
