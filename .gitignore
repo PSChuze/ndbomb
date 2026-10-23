@@ -9,4 +9,5 @@ dist/
 compose.override.yml
 .setup-files
 .setup-version
+bomb/build.json
 data/

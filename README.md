@@ -134,6 +134,20 @@ with a panel it finds on the same machine. Without pairing, give the panel
 `POL_ADMIN_GAME_BOMB_URL=http://bomb:24090` and `POL_ADMIN_GAME_BOMB_TOKEN` = your
 `BOMB_ADMIN_TOKEN`.
 
+## Updating
+
+- **From the admin panel**: once the panel's owner approves this server's updater (Settings >
+  Modules; setup sends it when it pairs), the panel shows when a newer release is out and its
+  Update button installs it.
+- **From setup**: run Bomberman Server Setup and choose Update.
+- **From a terminal**, in the server folder: `python setup.py --update --yes`.
+
+An update downloads the newest release, builds it while the old version keeps running, then
+swaps the files and restarts the services that were running (stopped ones stay stopped) and
+checks the server. `.env`, `state/`, `backups/` and `logs/` are never touched, and nor is the
+Feega install. If the build fails, nothing changes. In a git clone, Update runs `git pull`
+instead.
+
 ## Development
 
 ```sh

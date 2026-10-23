@@ -9,6 +9,8 @@ Off unless BOMB_ADMIN_PORT is set. The panel is then given this address and the 
                       POL_ADMIN_GAME_BOMB_TOKEN on the panel's side)
   BOMB_ADMIN_CONTAINERS  the containers its server check covers (comma list), default this
                       compose file's (project "bomb")
+  BOMB_UPDATE_REPO    the GitHub repository whose releases the update notice compares this
+                      build with, default PSChuze/ndbomb; "off" turns the check off (updates.py)
 
 What the panel gets: who is online and where, the rooms, and the admin's commands from admin.py
 (announce, a chat line, the conduct warning, a lobby tip), each run through game.admin_request
@@ -38,7 +40,7 @@ import json
 import os
 import time
 
-from . import admin, live, olpage, olport, support
+from . import admin, live, olpage, olport, support, updates
 from .olpage import esc, form, page, panel, posted, table
 
 PORT = int(os.environ.get("BOMB_ADMIN_PORT", "0") or 0)
@@ -292,6 +294,8 @@ def build(game):
         services=[{"name": "Bomberman Online", "containers": CONTAINERS, "ports": {"10020": "game"},
                    "warning": "Everyone in Bomberman Online is disconnected."}])
 
+    check = updates.from_env()
+
     @port.status
     def status():
         snap = live.snapshot()
@@ -308,6 +312,7 @@ def build(game):
             if playing else "",
             "facts": [{"label": "ranked players", "value": snap["totals"]["players"]},
                       {"label": "rounds played", "value": snap["totals"]["rounds"]}],
+            "update": check.get(),
         }
 
     @port.action("announce", "Announce", kind="announce",

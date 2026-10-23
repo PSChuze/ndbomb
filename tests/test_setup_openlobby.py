@@ -188,6 +188,8 @@ class FakePanel:
                         else (403, {"error": "bad code"})
                 else:
                     code, doc = (200, {"ok": True}) if body["pairing"] == "secret" else (403, {"error": "no"})
+                if code == 200 and "updater" in body:
+                    doc["updater"] = "requested"
                 out = json.dumps(doc).encode()
                 self.send_response(code)
                 self.send_header("Content-Length", str(len(out)))
@@ -203,7 +205,7 @@ class PairTest(unittest.TestCase):
     def test_pairing(self):
         panel = FakePanel()
         self.assertEqual(openlobby.pair(panel.url, "GOODCODE", "bomb", "Bomberman Online",
-                                        "http://bomb:24090", "tok"), "secret")
+                                        "http://bomb:24090", "tok")["pairing"], "secret")
         self.assertEqual(panel.seen[0], ("/api/pair", {"code": "GOODCODE", "key": "bomb", "title": "Bomberman Online",
                                                        "url": "http://bomb:24090", "token": "tok"}))
         with self.assertRaises(openlobby.Failed):
@@ -211,6 +213,44 @@ class PairTest(unittest.TestCase):
         openlobby.pair_update(panel.url, "bomb", "secret", "tok2")
         self.assertEqual(panel.seen[-1], ("/api/pair/update", {"key": "bomb", "pairing": "secret", "token": "tok2"}))
         panel.srv.shutdown()
+
+    def test_setup_sends_the_update_block_and_passes_on_the_answer(self):
+        panel = FakePanel()
+        root = tempfile.mkdtemp(prefix="bomb-pair-")
+        shutil.copy(os.path.join(HERE, ".env.example"), root)
+        setup.use_root(root)
+        try:
+            setup.write_env({"BOMB_ADMIN_TOKEN": "tok"})
+            out = io.StringIO()
+            with mock.patch.object(openlobby, "panel_url", return_value=panel.url), \
+                    mock.patch("builtins.input", lambda *_: "GOODCODE"), mock.patch("sys.stdout", out):
+                setup.offer_panel(setup.read_env(), ask_first=False)
+            path, body = panel.seen[-1]
+            self.assertEqual(path, "/api/pair")
+            self.assertEqual(body["updater"], {"folder": root, "command": ["python", "setup.py", "--update", "--yes"],
+                                               "timeout_minutes": 60})
+            self.assertTrue(os.path.isabs(body["updater"]["folder"]))
+            self.assertIn("must approve one-click updates", out.getvalue())
+            self.assertEqual(setup.read_env()["OPENLOBBY_PAIRING"], "secret")
+            self.assertEqual(setup.read_choices()["updater_folder"], root)
+
+            # the same folder is not sent again; a moved one goes through /api/pair/update
+            seen = len(panel.seen)
+            with mock.patch.object(openlobby, "panel_url", return_value=panel.url), mock.patch("sys.stdout", out):
+                setup.resend_updater()
+                self.assertEqual(len(panel.seen), seen)
+                choices = setup.read_choices()
+                choices["updater_folder"] = os.path.join(root, "old place")
+                setup.write_choices(choices)
+                setup.resend_updater()
+            path, body = panel.seen[-1]
+            self.assertEqual(path, "/api/pair/update")
+            self.assertEqual((body["pairing"], body["token"], body["updater"]["folder"]), ("secret", "tok", root))
+            self.assertEqual(setup.read_choices()["updater_folder"], root)
+        finally:
+            setup.use_root(HERE)
+            shutil.rmtree(root, ignore_errors=True)
+            panel.srv.shutdown()
 
     def test_the_panel_is_found_by_its_label(self):
         fake = FakeDocker({"ol-panel-1": {"org.openlobby.role": "panel",

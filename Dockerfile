@@ -6,6 +6,7 @@
 # (profiles.json, players.json, support.json, news.json, faq.json) and logs under /logs; compose
 # mounts both from the state folder. The image carries no game data, keys or certificates.
 # Sign-in is the Feega service's (its own container, PSChuze/freega).
+# bomb/build.json, when setup wrote one, names the release commit the image is built from.
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \

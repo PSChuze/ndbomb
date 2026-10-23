@@ -24,6 +24,7 @@ TMP = tempfile.mkdtemp(prefix="bomb-adminport-")
 os.environ["BOMB_LOG_DIR"] = os.path.join(TMP, "logs")
 os.environ["BOMB_DATA_DIR"] = os.path.join(TMP, "data")
 os.environ["BOMB_ADMIN_TOKEN"] = TOKEN = "selftest-token-0123"
+os.environ["BOMB_UPDATE_REPO"] = "off"      # offline: the update notice says why it is unknown
 
 from . import adminport, game, live, support  # noqa: E402  (read the env at import)
 from .fakefeega import FakeFeega  # noqa: E402
@@ -98,6 +99,8 @@ def main():
     name = game.admin_request({"op": "who"})["players"][0]["name"]
     check("the player in the lobby is online", now.get("online") == 1
           and now["players"] == [{"name": name, "where": "lobby"}])
+    check("status.json has the update notice", (now.get("update") or {}).get("update") == "unknown"
+          and "off" in now["update"]["why"] and "running" in now["update"])
     check("its logins are feega logins, and it has a player picker",
           desc.get("accounts") == "feega" and desc.get("players") is True)
     st, found = call("/openlobby/players.json?q=" + urllib.parse.quote(name[:3].lower()) + "&limit=5")

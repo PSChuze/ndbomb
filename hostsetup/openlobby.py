@@ -234,12 +234,15 @@ def _post(url, body, timeout=15):
         raise Failed("The panel did not answer (%s)." % e)
 
 
-def pair(panel, code, key, title, url, token):
-    """Pair with the panel's one-time code; returns the pairing secret to keep."""
-    status, doc = _post(panel + "/api/pair", {"code": code, "key": key, "title": title,
-                                              "url": url, "token": token})
+def pair(panel, code, key, title, url, token, updater=None):
+    """Pair with the panel's one-time code; returns the panel's answer, whose "pairing" is the
+    secret to keep. `updater` is the panel's one-click update block (folder, command)."""
+    body = {"code": code, "key": key, "title": title, "url": url, "token": token}
+    if updater:
+        body["updater"] = updater
+    status, doc = _post(panel + "/api/pair", body)
     if status == 200 and doc.get("pairing"):
-        return doc["pairing"]
+        return doc
     if status == 403:
         raise Failed("The panel did not take that code (wrong, used, or older than 10 minutes).")
     if status == 429:
@@ -247,13 +250,17 @@ def pair(panel, code, key, title, url, token):
     raise Failed("The panel said no: %s" % (doc.get("error") or "HTTP %d" % status))
 
 
-def pair_update(panel, key, pairing, token, url=""):
+def pair_update(panel, key, pairing, token, url="", updater=None):
+    """Send the panel a new token, address or update block; returns its answer."""
     body = {"key": key, "pairing": pairing, "token": token}
     if url:
         body["url"] = url
+    if updater:
+        body["updater"] = updater
     status, doc = _post(panel + "/api/pair/update", body)
     if status != 200:
-        raise Failed("The panel did not take the new token: %s" % (doc.get("error") or "HTTP %d" % status))
+        raise Failed("The panel did not take the change: %s" % (doc.get("error") or "HTTP %d" % status))
+    return doc
 
 
 # --- Feega ---------------------------------------------------------------------------------

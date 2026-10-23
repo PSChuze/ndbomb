@@ -5,6 +5,9 @@ writes .env, makes sure Feega (the sign-in service) and the shared DNS server ru
 server in Docker and checks it. Later runs show a menu: start and stop, settings, update,
 backups, support mail, logs. Needs Docker and nothing else (Python 3.8+ when run as a script,
 standard library only).
+
+`python setup.py --update --yes` updates the server folder to the newest release without a
+question (an admin panel's Update button runs it, with no terminal).
 """
 import argparse
 import datetime
@@ -16,6 +19,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 import zipfile
@@ -49,6 +53,9 @@ GAME_PORTS = ((80, "TCP"), (9901, "TCP"), (10020, "TCP"), (10020, "UDP"), (10081
 FEEGA_PORTS = ((14020, "TCP"), (14080, "TCP"))
 # Files of ours in the server folder that an update must never replace.
 KEEP = (".env", "compose.override.yml", "state", "backups", "logs")
+# What an admin panel runs in the server folder for its Update button.
+UPDATE_COMMAND = ["python", "setup.py", "--update", "--yes"]
+UPDATE_MINUTES = 60
 
 
 def use_root(path):
@@ -177,6 +184,29 @@ def unpack_server(archive, root, version=""):
     return written
 
 
+def write_build(root, commit, tag="", built_at=None):
+    """bomb/build.json: the commit the server folder holds, which the server cannot learn
+    from a git archive. The admin panel's update notice compares it with the newest release."""
+    if not commit:
+        return
+    built_at = built_at or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    path = os.path.join(root, "bomb", "build.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump({"commit": commit, "tag": tag, "built_at": built_at}, f)
+        f.write("\n")
+
+
+def archive_commit(archive):
+    """The commit a git archive zip was made from (git writes it as the zip comment), or ""."""
+    try:
+        with zipfile.ZipFile(archive) as z:
+            comment = z.comment.decode("ascii", "replace").strip().lower()
+    except (OSError, zipfile.BadZipFile):
+        return ""
+    return comment if re.match(r"^[0-9a-f]{40}$", comment) else ""
+
+
 def installed_version():
     try:
         with open(VERSION_FILE, encoding="utf-8") as f:
@@ -200,6 +230,13 @@ def ensure_server_files():
         with open(bundled("server-version.txt"), encoding="utf-8") as f:
             version = f.read().strip()
     unpack_server(archive, ROOT, version)
+    if bundled("server-build.json"):
+        try:
+            with open(bundled("server-build.json"), encoding="utf-8") as f:
+                info = json.load(f)
+            write_build(ROOT, info.get("commit"), info.get("tag") or version, info.get("built_at"))
+        except (OSError, ValueError, AttributeError):
+            pass
     say("The server's files are in %s" % ROOT)
     return True
 
@@ -618,13 +655,44 @@ def offer_panel(env, ask_first=True):
         if not code:
             return
         try:
-            secret = openlobby.pair(panel, code, KEY, TITLE, ADMIN_URL, env["BOMB_ADMIN_TOKEN"])
+            answer = openlobby.pair(panel, code, KEY, TITLE, ADMIN_URL, env["BOMB_ADMIN_TOKEN"],
+                                    updater=updater_block())
         except openlobby.Failed as e:
             say(str(e))
             continue
-        write_env({"OPENLOBBY_PAIRING": secret})
+        write_env({"OPENLOBBY_PAIRING": answer["pairing"]})
+        updater_sent(answer)
         say("Paired. %s shows in the panel." % TITLE)
         return
+
+
+def updater_block():
+    """How the panel runs an update here: the server folder as this computer sees it."""
+    return {"folder": ROOT, "command": list(UPDATE_COMMAND), "timeout_minutes": UPDATE_MINUTES}
+
+
+def updater_sent(answer):
+    """Remember the folder the panel has, and pass on its answer to the update block."""
+    choices = read_choices()
+    choices["updater_folder"] = ROOT
+    write_choices(choices)
+    if answer.get("updater") == "requested":
+        say("The panel's owner must approve one-click updates for %s on Settings > Modules." % TITLE)
+
+
+def resend_updater():
+    """Tell a paired panel where the server folder is when it has moved since pairing."""
+    env = read_env()
+    if not env.get("OPENLOBBY_PAIRING") or read_choices().get("updater_folder") == ROOT:
+        return
+    panel = openlobby.panel_url()
+    if not panel:
+        return
+    try:
+        updater_sent(openlobby.pair_update(panel, KEY, env["OPENLOBBY_PAIRING"], env.get("BOMB_ADMIN_TOKEN", ""),
+                                           updater=updater_block()))
+    except openlobby.Failed as e:
+        say(str(e))
 
 
 # --- steps -------------------------------------------------------------------------------
@@ -891,7 +959,8 @@ def change_token(env, choices):
     panel = openlobby.panel_url()
     if env.get("OPENLOBBY_PAIRING") and panel:
         try:
-            openlobby.pair_update(panel, KEY, env["OPENLOBBY_PAIRING"], token)
+            updater_sent(openlobby.pair_update(panel, KEY, env["OPENLOBBY_PAIRING"], token,
+                                               updater=updater_block()))
             say("The panel has the new token.")
         except openlobby.Failed as e:
             say(str(e))
@@ -918,40 +987,152 @@ def stop_server():
         say("keep running, since other games may use them.")
 
 
-def update():
-    """Fetch the new version and restart the server with it."""
-    if os.path.exists(os.path.join(ROOT, ".git")):
-        if run(["git", "pull", "--ff-only"], check=False).returncode != 0:
-            say("git pull failed (local changes?). Nothing was changed.")
-            return
-    else:
+class UpdateFailed(Exception):
+    """An update that stopped; the message is the one sentence it ends on."""
+
+
+def running_services():
+    """The compose services running now (stderr kept apart: compose warns there)."""
+    try:
+        r = subprocess.run(["docker", "compose", "ps", "--status", "running", "--services"], cwd=ROOT,
+                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           text=True, encoding="utf-8", errors="replace", timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        r = None
+    if r is None or r.returncode != 0:
+        raise UpdateFailed("Docker did not say which services run, so nothing was changed.")
+    return [line.strip() for line in r.stdout.splitlines() if line.strip()]
+
+
+def build_images(folder, progress, log, what):
+    """docker compose build in folder; UpdateFailed (old version still running) when it fails."""
+    progress.begin("Building %s" % what, "a few minutes")
+    code, tail = proglib.run_logged(["docker", "compose", "build"], log, cwd=folder, progress=progress)
+    progress.end(code == 0)
+    if code != 0:
+        failed("Building %s failed." % what, tail)
+        raise UpdateFailed("Building %s failed; the server still runs the old version." % what)
+
+
+def restart_running(running, progress, log):
+    """Recreate the services that ran before the update with the new images, and check them.
+    Services that were stopped stay stopped. Returns what to say about it."""
+    if not running:
+        return "the server was stopped and stays stopped"
+    progress.begin("Restarting %s" % ", ".join(running), "a few seconds")
+    code, tail = proglib.run_logged(["docker", "compose", "up", "-d", "--no-build"] + running, log, cwd=ROOT,
+                                    progress=progress)
+    progress.end(code == 0)
+    if code != 0:
+        failed("Restarting the server failed.", tail)
+        raise UpdateFailed("The new version is in place but did not start; see %s." % LOG)
+    if "game" not in running:
+        return "restarted %s" % ", ".join(running)
+    progress.begin("Checking the server", "a few seconds")
+    ok = smoke(quiet=True, tries=10)
+    progress.end(ok)
+    if not ok:
+        raise UpdateFailed("The new version runs but its check failed; see the lines above.")
+    return "restarted %s and the check passed" % ", ".join(running)
+
+
+def download(url, path, timeout=60):
+    with urllib.request.urlopen(url, timeout=timeout) as r, open(path, "wb") as f:
+        shutil.copyfileobj(r, f)
+
+
+def remove_old_stages():
+    """Drop what an update that was cut off left behind."""
+    for name in os.listdir(ROOT):
+        if name.startswith(".update-"):
+            shutil.rmtree(os.path.join(ROOT, name), ignore_errors=True)
+
+
+def update(yes=False):
+    """Update the server folder to the newest release: download and unpack it beside the old
+    files, build it, and only then swap the files and restart what was running, so a failure
+    before the swap leaves the old version running. Returns the closing line; raises
+    UpdateFailed. With yes it never asks anything."""
+    progress = proglib.Progress()
+    with log_file() as log:
+        if os.path.exists(os.path.join(ROOT, ".git")):
+            say("This server folder is a git checkout: pulling the newest commits.")
+            if run(["git", "pull", "--ff-only"], check=False, stdin=subprocess.DEVNULL).returncode != 0:
+                raise UpdateFailed("git pull failed (local changes?), so nothing was changed.")
+            running = running_services()
+            build_images(ROOT, progress, log, "the server program")
+            return "Updated from git: %s." % restart_running(running, progress, log)
+
+        say("Looking for the newest release on GitHub.")
         release = latest_release()
         if not release:
-            say("Could not reach %s. Check the internet connection." % RELEASES)
-            return
+            raise UpdateFailed("Could not reach GitHub to find the newest release, so nothing was changed.")
         tag, url = release
         if tag == installed_version():
-            say("This is the newest version (%s)." % tag)
-            if not ask_yes("Rebuild the server program anyway?", False):
-                return
-        else:
-            say("Downloading %s..." % tag)
-            archive = os.path.join(ROOT, "logs", "update.zip")
-            os.makedirs(os.path.dirname(archive), exist_ok=True)
+            if yes or not ask_yes("This is the newest version (%s). Rebuild the server program anyway?" % tag,
+                                  False):
+                return "Already up to date (%s)." % tag
+            running = running_services()
+            build_images(ROOT, progress, log, "the server program")
+            return "Rebuilt %s: %s." % (tag, restart_running(running, progress, log))
+
+        say("Updating from %s to %s." % (installed_version() or "an unknown version", tag))
+        remove_old_stages()
+        stage = tempfile.mkdtemp(prefix=".update-", dir=ROOT)
+        try:
+            archive = os.path.join(stage, "source.zip")
+            say("Downloading %s." % tag)
             try:
-                urllib.request.urlretrieve(url, archive)
-                unpack_server(archive, ROOT, tag)
+                download(url, archive)
+                new = os.path.join(stage, "server")
+                os.makedirs(new)
+                unpack_server(archive, new)
             except (OSError, zipfile.BadZipFile) as e:
-                say("The download failed (%s). Nothing was changed." % e)
-                return
-            finally:
-                if os.path.exists(archive):
-                    os.remove(archive)
-            say("Updated the server's files to %s." % tag)
-            if FROZEN:
-                say("A new Bomberman Server Setup is also on %s" % RELEASES)
-    with log_file() as log:
-        start_server(proglib.Progress(), log)
+                raise UpdateFailed("The download of %s failed (%s), so nothing was changed." % (tag, e))
+            # the build reads the host's settings the way the running server does
+            for name in (".env", "compose.override.yml"):
+                if os.path.exists(os.path.join(ROOT, name)):
+                    shutil.copy2(os.path.join(ROOT, name), os.path.join(new, name))
+            running = running_services()
+            build_images(new, progress, log, tag)
+            say("Putting %s's files in %s." % (tag, ROOT))
+            unpack_server(archive, ROOT, tag)
+            write_build(ROOT, archive_commit(archive), tag)
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
+        done = restart_running(running, progress, log)
+    if FROZEN:
+        say("A new Bomberman Server Setup is also on %s" % RELEASES)
+    return "Updated to %s: %s." % (tag, done)
+
+
+def update_menu():
+    try:
+        say(update())
+    except UpdateFailed as e:
+        say(str(e))
+
+
+def update_now(yes):
+    """setup.py --update: exit code 0 when updated or already current, and the last line
+    printed is the outcome in one sentence."""
+    try:
+        if not os.path.exists(os.path.join(ROOT, "compose.yml")):
+            raise UpdateFailed("%s holds no Bomberman server, so there is nothing to update." % ROOT)
+        if not os.path.exists(ENV):
+            raise UpdateFailed("This server is not set up yet; run Bomberman Server Setup first.")
+        os.chdir(ROOT)
+        if not wait_for_docker(wait=False):
+            raise UpdateFailed("Docker is not running, so nothing was changed.")
+        say(update(yes=yes))
+        return 0
+    except UpdateFailed as e:
+        say(str(e))
+    except KeyboardInterrupt:
+        say("The update was stopped.")
+    except Exception as e:      # the last line must still say what happened
+        say("The update stopped on an unexpected error (%s: %s)." % (type(e).__name__, e))
+    return 1
 
 
 def backup():
@@ -1052,7 +1233,7 @@ def remove():
 MENU = [("Start the server", start_server_menu),
         ("Stop the server", stop_server),
         ("Change settings", change_settings),
-        ("Update", update),
+        ("Update", update_menu),
         ("Make a backup", backup),
         ("Restore a backup", restore),
         ("Read and answer support mail", support_mail),
@@ -1089,6 +1270,9 @@ def parse_args(argv=None):
         "questions; later runs show a menu."))
     ap.add_argument("--folder", help="the server folder (default: the one this runs from, or "
                                      "'Bomberman Server' in your home folder for the setup program)")
+    ap.add_argument("--update", action="store_true",
+                    help="update the server to the newest release, rebuild it and restart what was running")
+    ap.add_argument("--yes", action="store_true", help="never ask anything (with --update, run without a terminal)")
     ap.add_argument("--dry-run", action="store_true",
                     help="ask the questions, then show what would be done; writes nothing and needs no Docker")
     return ap.parse_args(argv)
@@ -1097,6 +1281,8 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
     use_root(find_root(args.folder))
+    if args.update:
+        return update_now(args.yes)
     try:
         if args.dry_run:
             say("Server folder: %s%s" % (ROOT, "" if os.path.exists(os.path.join(ROOT, "compose.yml")) else
@@ -1111,6 +1297,7 @@ def main(argv=None):
         if not os.path.exists(ENV):
             first_run()
             return
+        resend_updater()
         menu()
     except KeyboardInterrupt:
         say()
@@ -1118,12 +1305,14 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    code = 1
     try:
-        main()
+        code = main() or 0
     finally:
-        if FROZEN:
+        if FROZEN and "--yes" not in sys.argv[1:]:
             # A double-clicked program's window closes when it ends: keep it open to be read.
             try:
                 input("Press Enter to close this window.")
             except (EOFError, KeyboardInterrupt):
                 pass
+    sys.exit(code)

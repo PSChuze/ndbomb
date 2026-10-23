@@ -15,7 +15,11 @@ def minutes(seconds):
 class Progress:
     """One status line per step: "Building the server (about 5 minutes): part 2
     of 3, 3 minutes so far", redrawn in place, and a closing line when the step
-    ends. Without a terminal (output to a file) only the closing lines are written."""
+    ends. Without a terminal (output to a file or a job log) the opening and closing
+    lines are written, and a line every HEARTBEAT seconds while a step runs, so a
+    reader that stops a silent job knows it is still working."""
+
+    HEARTBEAT = 120.0
 
     def __init__(self, out=None, clock=time.monotonic):
         self.out = out or sys.stdout
@@ -24,6 +28,7 @@ class Progress:
         self.title = None
         self.detail = ""
         self.started = 0.0
+        self.noted = 0.0
         self.width = 0
 
     def begin(self, title, estimate=""):
@@ -31,6 +36,7 @@ class Progress:
             return
         self.end()
         self.title, self.estimate, self.detail, self.started = title, estimate, "", self.clock()
+        self.noted = self.started
         if not self.live:
             self._write("%s%s...\n" % (title, " (%s)" % estimate if estimate else ""))
         self.tick()
@@ -51,6 +57,9 @@ class Progress:
             text = self.line()
             self._write("\r" + text + " " * max(0, self.width - len(text)))
             self.width = len(text)
+        elif self.title and self.clock() - self.noted >= self.HEARTBEAT:
+            self.noted = self.clock()
+            self._write(self.line() + "\n")
 
     def end(self, ok=True):
         if not self.title:
@@ -87,8 +96,10 @@ def run_logged(cmd, log, on_line=None, progress=None, cwd=None, env=None):
         try:
             line = lines.get(timeout=1)
         except queue.Empty:
-            if progress:
-                progress.tick()
+            line = ""
+        if progress:
+            progress.tick()
+        if line == "":
             continue
         if line is None:
             break
