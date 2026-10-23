@@ -640,11 +640,37 @@ def ensure_http(choices, progress, log):
     return True
 
 
+def interactive():
+    """Someone at a terminal who can answer questions."""
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def choose_panel(found):
+    pick = ask_choice("More than one OpenLobby admin panel is running here. Which one should manage %s?" % TITLE,
+                      ["%s (%s)" % p for p in found])
+    return found[pick - 1][1]
+
+
+def find_panel():
+    """The panel to pair with: the one paired before when it is still running, else the only one,
+    else the host's pick. "" when there is none; None when there are several and no terminal to
+    choose (said so)."""
+    try:
+        return openlobby.panel_url(choose=choose_panel if interactive() else None,
+                                   prefer=read_choices().get("panel_url", ""))
+    except openlobby.Failed as e:
+        say(str(e))
+        return None
+
+
 def offer_panel(env, ask_first=True):
     """Pair with an OpenLobby admin panel running here, when the host wants that."""
-    panel = openlobby.panel_url()
+    panel = find_panel()
     if not panel:
-        if not ask_first:
+        if panel == "" and not ask_first:
             say("No OpenLobby admin panel is running on this computer.")
         return
     if ask_first and not ask_yes("An OpenLobby admin panel is running here. Manage %s from it?" % TITLE):
@@ -661,6 +687,9 @@ def offer_panel(env, ask_first=True):
             say(str(e))
             continue
         write_env({"OPENLOBBY_PAIRING": answer["pairing"]})
+        choices = read_choices()
+        choices["panel_url"] = panel
+        write_choices(choices)
         updater_sent(answer)
         say("Paired. %s shows in the panel." % TITLE)
         return
@@ -685,7 +714,7 @@ def resend_updater():
     env = read_env()
     if not env.get("OPENLOBBY_PAIRING") or read_choices().get("updater_folder") == ROOT:
         return
-    panel = openlobby.panel_url()
+    panel = find_panel()
     if not panel:
         return
     try:
@@ -956,8 +985,8 @@ def change_panel(env, choices):
 def change_token(env, choices):
     token = secrets.token_hex(16)
     write_env({"BOMB_ADMIN_TOKEN": token})
-    panel = openlobby.panel_url()
-    if env.get("OPENLOBBY_PAIRING") and panel:
+    panel = find_panel() if env.get("OPENLOBBY_PAIRING") else ""
+    if panel:
         try:
             updater_sent(openlobby.pair_update(panel, KEY, env["OPENLOBBY_PAIRING"], token,
                                                updater=updater_block()))

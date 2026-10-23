@@ -29,7 +29,7 @@ DNS_PROJECT = "openlobby-dns"
 HTTP_PROJECT = "openlobby-http"
 FEEGA_REPO = os.environ.get("FREEGA_REPO", "PSChuze/freega")
 # The Feega release setup installs when there is none; a newer one is the Feega host's choice.
-FEEGA_TAG = os.environ.get("FREEGA_TAG", "v1.0.1")
+FEEGA_TAG = os.environ.get("FREEGA_TAG", "v1.0.2")
 FEEGA_PROJECT = "freega"
 FEEGA_NAMES = ("lib.feega.sonyfinance.co.jp",)
 FEEGA_URL = "http://feega:24030"
@@ -210,13 +210,31 @@ def http_remove(container, key):
 
 # --- an admin panel ------------------------------------------------------------------------
 
-def panel_url():
-    """The address of an OpenLobby admin panel running here, or ""."""
+def panels():
+    """(container, address) of every OpenLobby admin panel running here."""
+    found = []
     for name in containers("org.openlobby.role=panel"):
-        url = label(name, "org.openlobby.panel.url")
+        url = label(name, "org.openlobby.panel.url").rstrip("/")
         if url:
-            return url.rstrip("/")
-    return ""
+            found.append((name, url))
+    return found
+
+
+def panel_url(choose=None, prefer=""):
+    """The address of the OpenLobby admin panel running here, or "". With more than one,
+    `prefer` (the one paired before) when it is among them, else choose(panels) picks; without
+    `choose` it never guesses and raises Failed."""
+    found = panels()
+    if not found:
+        return ""
+    if len(found) == 1:
+        return found[0][1]
+    if prefer and prefer.rstrip("/") in [url for _, url in found]:
+        return prefer.rstrip("/")
+    if choose is None:
+        raise Failed("More than one OpenLobby admin panel is running here (%s), so none was paired: "
+                     "run Setup and choose the panel." % ", ".join("%s at %s" % p for p in found))
+    return choose(found)
 
 
 def _post(url, body, timeout=15):

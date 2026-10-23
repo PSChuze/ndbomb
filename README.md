@@ -142,6 +142,9 @@ with a panel it finds on the same machine. Without pairing, give the panel
 - **From setup**: run Bomberman Server Setup and choose Update.
 - **From a terminal**, in the server folder: `python setup.py --update --yes`.
 
+Installs of v1.0.0 must run Setup and choose Update once; after that the panel's Update button
+works.
+
 An update downloads the newest release, builds it while the old version keeps running, then
 swaps the files and restarts the services that were running (stopped ones stay stopped) and
 checks the server. `.env`, `state/`, `backups/` and `logs/` are never touched, and nor is the

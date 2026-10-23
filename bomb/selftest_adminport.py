@@ -100,7 +100,8 @@ def main():
     check("the player in the lobby is online", now.get("online") == 1
           and now["players"] == [{"name": name, "where": "lobby"}])
     check("status.json has the update notice", (now.get("update") or {}).get("update") == "unknown"
-          and "off" in now["update"]["why"] and "running" in now["update"])
+          and "off" in now["update"]["why"] and isinstance(now["update"].get("running"), dict)
+          and now["update"]["latest"] == {"commit": None, "date": None} and now["update"]["behind"] == 0)
     check("its logins are feega logins, and it has a player picker",
           desc.get("accounts") == "feega" and desc.get("players") is True)
     st, found = call("/openlobby/players.json?q=" + urllib.parse.quote(name[:3].lower()) + "&limit=5")

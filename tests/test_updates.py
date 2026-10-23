@@ -39,8 +39,18 @@ class FakeGitHub:
         return 404, None
 
 
-def check(gh, revision=RUNNING, repo=REPO):
-    return updates.UpdateCheck(repo, revision, "2025-01-01T00:00:00Z", fetch=gh).get(wait=5)
+def check(gh, revision=RUNNING, repo=REPO, built_at="2025-01-01T00:00:00Z"):
+    return updates.UpdateCheck(repo, revision, built_at, fetch=gh).get(wait=5)
+
+
+def assert_unknown_shape(test, out, why, running=None):
+    """The panel's shape for an unknown answer: objects and numbers, never a bare null."""
+    test.assertEqual(out["update"], "unknown")
+    test.assertIn(why, out["why"])
+    test.assertEqual(out["latest"], {"commit": None, "date": None})
+    test.assertEqual(out["behind"], 0)
+    test.assertEqual(out["changes"], [])
+    test.assertEqual(out["running"], running or {"commit": RUNNING, "built_at": "2025-01-01T00:00:00Z"})
 
 
 class UpdateObjectTest(unittest.TestCase):
@@ -74,20 +84,35 @@ class UpdateObjectTest(unittest.TestCase):
         self.assertEqual(out["changes"][0]["subject"], "change 79")
 
     def test_offline_is_unknown_with_a_reason(self):
-        out = check(FakeGitHub(offline=True))
-        self.assertEqual(out["update"], "unknown")
-        self.assertIn("GitHub did not answer", out["why"])
-        self.assertEqual(out["changes"], [])
-        self.assertIsNone(out["latest"])
+        assert_unknown_shape(self, check(FakeGitHub(offline=True)), "GitHub did not answer")
 
     def test_other_unknowns(self):
-        self.assertIn("no release", check(FakeGitHub(tag=""))["why"])
-        self.assertIn("too many requests", check(FakeGitHub(status=403))["why"])
-        self.assertIn("does not know its commit", check(FakeGitHub(), revision="")["why"])
-        self.assertIn("off", check(FakeGitHub(), repo="off")["why"])
-        self.assertIn("owner/name", check(FakeGitHub(), repo="nonsense")["why"])
-        out = check(FakeGitHub(), revision="")
-        self.assertEqual(out["running"]["commit"], "unknown")
+        assert_unknown_shape(self, check(FakeGitHub(tag="")), "no release")
+        assert_unknown_shape(self, check(FakeGitHub(status=403)), "too many requests")
+        assert_unknown_shape(self, check(FakeGitHub(), repo="off"), "off")
+        assert_unknown_shape(self, check(FakeGitHub(), repo="nonsense"), "owner/name")
+        assert_unknown_shape(self, check(FakeGitHub(), revision="", built_at=""), "does not know its commit",
+                             running={"commit": None, "built_at": None})
+
+    def test_unexpected_answers_and_a_commit_not_in_the_repo(self):
+        def answers(compare_status=200, head_status=200):
+            def fetch(url):
+                path = url[len(updates.API):]
+                if path.endswith("/releases/latest"):
+                    return 200, {"tag_name": "v1.1.0"}
+                if "/commits/" in path:
+                    return head_status, commit(NEWER, "Release") if head_status == 200 else None
+                return compare_status, {"ahead_by": 0, "commits": []} if compare_status == 200 else None
+            return fetch
+        assert_unknown_shape(self, check(answers(head_status=500)), "unexpected answer")
+        assert_unknown_shape(self, check(answers(compare_status=404)), "not in")
+        assert_unknown_shape(self, check(answers(compare_status=500)), "unexpected answer")
+
+    def test_a_check_that_breaks_is_unknown(self):
+        def broken(url):
+            raise RuntimeError("bug")
+        with self.assertLogs("bomb.updates", "ERROR"):
+            assert_unknown_shape(self, check(broken), "The check failed")
 
     def test_answer_is_cached(self):
         now = [0.0]
@@ -112,8 +137,7 @@ class UpdateObjectTest(unittest.TestCase):
             raise OSError("late")
         out = updates.UpdateCheck(REPO, RUNNING, fetch=slow).get(wait=0.05)
         gate.set()
-        self.assertEqual(out["update"], "unknown")
-        self.assertIn("Still asking", out["why"])
+        assert_unknown_shape(self, out, "Still asking", running={"commit": RUNNING, "built_at": None})
 
 
 class BuildInfoTest(unittest.TestCase):

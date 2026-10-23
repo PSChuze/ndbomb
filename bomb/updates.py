@@ -80,7 +80,9 @@ def _subject(c):
 
 
 def unknown(why):
-    return {"latest": None, "behind": None, "changes": [], "update": "unknown", "why": why, "how": HOW}
+    """The answer when there is none: every field the panel reads, empty, plus why."""
+    return {"latest": {"commit": None, "date": None}, "behind": 0, "changes": [], "update": "unknown",
+            "why": why, "how": HOW}
 
 
 def build_info(path=None):
@@ -124,7 +126,7 @@ class UpdateCheck:
                 answer = self.answer
         if answer is None:
             answer = unknown("Still asking GitHub, try again in a moment.")
-        return dict(answer, running={"commit": self.revision or "unknown", "built_at": self.built_at or "unknown"})
+        return dict(answer, running={"commit": self.revision or None, "built_at": self.built_at or None})
 
     def _refresh(self):
         try:

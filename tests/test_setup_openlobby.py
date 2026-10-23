@@ -257,6 +257,42 @@ class PairTest(unittest.TestCase):
                                           "org.openlobby.panel.url": "http://127.0.0.1:8090/"}})
         with mock.patch.object(openlobby, "docker", fake):
             self.assertEqual(openlobby.panel_url(), "http://127.0.0.1:8090")
+            self.assertEqual(openlobby.panel_url(choose=lambda found: self.fail("asked")), "http://127.0.0.1:8090")
+
+    TWO = {"ol-panel-1": {"org.openlobby.role": "panel", "org.openlobby.panel.url": "http://127.0.0.1:8090"},
+           "lab-panel-1": {"org.openlobby.role": "panel", "org.openlobby.panel.url": "http://127.0.0.1:8091/"}}
+
+    def test_with_two_panels_it_never_guesses(self):
+        with mock.patch.object(openlobby, "docker", FakeDocker(self.TWO)):
+            with self.assertRaises(openlobby.Failed) as e:
+                openlobby.panel_url()
+            self.assertIn("ol-panel-1 at http://127.0.0.1:8090", str(e.exception))
+            self.assertIn("lab-panel-1 at http://127.0.0.1:8091", str(e.exception))
+            self.assertIn("run Setup and choose the panel", str(e.exception))
+            self.assertEqual(openlobby.panel_url(choose=lambda found: found[1][1]), "http://127.0.0.1:8091")
+            self.assertEqual(openlobby.panel_url(prefer="http://127.0.0.1:8091/"), "http://127.0.0.1:8091")
+
+    def test_setup_asks_which_panel_at_a_terminal(self):
+        out, asked = io.StringIO(), []
+        with mock.patch.object(openlobby, "docker", FakeDocker(self.TWO)),                 mock.patch.object(setup, "interactive", return_value=True),                 mock.patch.object(setup, "read_choices", return_value={}),                 mock.patch("builtins.input", lambda q: asked.append(q) or "2"), mock.patch("sys.stdout", out):
+            self.assertEqual(setup.find_panel(), "http://127.0.0.1:8091")
+        self.assertIn("Which one should manage", out.getvalue())
+        self.assertIn("ol-panel-1 (http://127.0.0.1:8090)", out.getvalue())
+        self.assertIn("lab-panel-1 (http://127.0.0.1:8091)", out.getvalue())
+        self.assertEqual(len(asked), 1)
+
+    def test_setup_without_a_terminal_stops_pairing(self):
+        out = io.StringIO()
+        with mock.patch.object(openlobby, "docker", FakeDocker(self.TWO)),                 mock.patch.object(setup, "interactive", return_value=False),                 mock.patch.object(setup, "read_choices", return_value={}),                 mock.patch("builtins.input", lambda *_: self.fail("asked")),                 mock.patch.object(openlobby, "pair", side_effect=AssertionError("paired")),                 mock.patch("sys.stdout", out):
+            self.assertIsNone(setup.find_panel())
+            setup.offer_panel({"BOMB_ADMIN_TOKEN": "tok"}, ask_first=False)
+        lines = [l for l in out.getvalue().splitlines() if l]
+        self.assertEqual(len(lines), 2)
+        self.assertIn("run Setup and choose the panel", lines[0])
+
+    def test_setup_keeps_the_panel_it_paired_with(self):
+        with mock.patch.object(openlobby, "docker", FakeDocker(self.TWO)),                 mock.patch.object(setup, "interactive", return_value=False),                 mock.patch.object(setup, "read_choices", return_value={"panel_url": "http://127.0.0.1:8091"}):
+            self.assertEqual(setup.find_panel(), "http://127.0.0.1:8091")
 
 
 class FirstStartTest(Temp):
