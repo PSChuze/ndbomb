@@ -29,7 +29,7 @@ DNS_PROJECT = "openlobby-dns"
 HTTP_PROJECT = "openlobby-http"
 FEEGA_REPO = os.environ.get("FREEGA_REPO", "PSChuze/freega")
 # The Feega release setup installs when there is none; a newer one is the Feega host's choice.
-FEEGA_TAG = os.environ.get("FREEGA_TAG", "v1.0.0")
+FEEGA_TAG = os.environ.get("FREEGA_TAG", "v1.0.1")
 FEEGA_PROJECT = "freega"
 FEEGA_NAMES = ("lib.feega.sonyfinance.co.jp",)
 FEEGA_URL = "http://feega:24030"
